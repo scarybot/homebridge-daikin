@@ -27,6 +27,7 @@ module.exports = function(homebridge){
   Service = homebridge.hap.Service;
   Characteristic = homebridge.hap.Characteristic;
   homebridge.registerAccessory("homebridge-daikin", "Daikin", Daikin);
+  homebridge.registerAccessory("homebridge-daikin", "DaikinOutside", DaikinOutside);
 };
 
 
@@ -64,6 +65,19 @@ function Daikin(log, config) {
 	this.service = new Service.Thermostat(this.name);
 }
 
+function DaikinOutside(log, config) {
+	this.log = log;
+
+	this.name = config.name;
+	this.apiroute = config.apiroute || "apiroute";
+	this.log(this.name, this.apiroute);
+	
+	this.model = config.model || "HTTP Model";
+	this.firmwareRevision = "HTTP Version";
+	this.outsideTemperature = 10;
+	this.service = new Service.TemperatureSensor(this.name);
+}
+
 function convertDaikinToJSON(input) {
 	// Daikin systems respond with HTTP response strings, not JSON objects. JSON is much easier to
 	// parse, so we convert it with some RegExp here.
@@ -86,6 +100,117 @@ function replaceAll(str, find, replace) {
 	return str.replace(new RegExp(escapeRegExp(find), 'g'), replace);
 	// From http://stackoverflow.com/a/1144788
 }
+
+DaikinOutside.prototype = {
+	httpRequest: function(url, body, method, username, password, sendimmediately, callback) {
+		request({
+				url: url,
+				body: body,
+				method: method,
+				auth: {
+					user: username,
+					pass: password,
+					sendImmediately: sendimmediately
+				}
+			},
+			function(error, response, body) {
+				callback(error, response, body);
+			});
+	},
+	//Start
+	identify: function(callback) {
+		this.log("Identify requested!");
+		callback(null);
+	},
+	getCurrentOutsideTemperature: function(callback) {
+		this.log("getCurrentOutsideTemperature from:", this.apiroute+"/aircon/get_sensor_info");
+		request.get({
+			url: this.apiroute+"/aircon/get_sensor_info"
+		}, function(err, response, body) {
+			if (!err && response.statusCode == 200) {
+				this.log("response success");
+				var json = JSON.parse(convertDaikinToJSON(body)); //{"ret":"OK","htemp":"24.0","hhum""-","otemp":"-","err":"0","cmpfreq":"0"}
+				this.log("Daikin mode is %s, currently %s degrees", this.currentHeatingCoolingState, json.otemp);
+				this.outsideTemperature = parseFloat(json.otemp);
+				callback(null, this.outsideTemperature); // success
+			} else {
+				this.log("Error getting state: %s", err);
+				callback(err);
+			}
+		}.bind(this));
+	},
+		getName: function(callback) {
+		this.log("getName :", this.name);
+		var error = null;
+		callback(error, this.name);
+	},
+	getModelInfo: function() {
+		// A parser for the model details will be coded here, returning the Firmware Revision, and if not set in the config
+		// file, the Name and Model as well
+		request.get({
+			url: this.apiroute+"/aircon/get_model_info"
+		}, function(err, response, body) {
+			if (!err && response.statusCode == 200) {
+				this.log("response success");
+				var json = JSON.parse(convertDaikinToJSON(body)); //{"pow":"1","mode":3,"stemp":"21","shum":"34.10"}
+				this.log("Your Model is: " + json.model);
+				
+				if (this.model == "HTTP Model" /*& json.model != "NOTSUPPORT"*/) {
+					this.model = json.model;
+					// this.log("Model: " + json.model + ", " + this.model);
+				} // Doesn't yet override original value, working on that later
+				
+			} else {
+				this.log("Error getting model info: %s", err);
+			}
+		}.bind(this));
+		
+		request.get({
+			url: this.apiroute+"/common/basic_info"
+		}, function(err, response, body) {
+			if (!err && response.statusCode == 200) {
+				this.log("response success");
+				var json = JSON.parse(convertDaikinToJSON(body)); //{"pow":"1","mode":3,"stemp":"21","shum":"34.10"}
+				
+				if (this.name == "Default Daikin") {
+					// Need to convert a series of Hexadecimal values to ASCII characters here
+				}
+				
+				this.firmwareRevision = replaceAll(json.ver, "_", ".");
+				
+				this.log("Set firmware version to " + this.firmwareRevision);
+				
+			} else {
+				this.log("Error getting basic info: %s", err);
+			}
+		}.bind(this));
+	},
+	getServices: function() {
+
+		// you can OPTIONALLY create an information service if you wish to override
+		// the default values for things like serial number, model, etc.
+		var informationService = new Service.AccessoryInformation();
+
+		this.getModelInfo();
+		
+		informationService
+			.setCharacteristic(Characteristic.Manufacturer, "Daikin")
+			.setCharacteristic(Characteristic.Model, this.model)
+			.setCharacteristic(Characteristic.FirmwareRevision, this.firmwareRevision)
+			.setCharacteristic(Characteristic.SerialNumber, "HTTP Serial Number");
+
+		this.service
+			.getCharacteristic(Characteristic.CurrentTemperature)
+			.on('get', this.getCurrentOutsideTemperature.bind(this));
+
+		this.service
+			.getCharacteristic(Characteristic.Name)
+			.on('get', this.getName.bind(this));
+
+		return [informationService, this.service];
+	}
+};
+
 
 Daikin.prototype = {
 	httpRequest: function(url, body, method, username, password, sendimmediately, callback) {
@@ -172,7 +297,7 @@ Daikin.prototype = {
 		callback(cBack);
 	},
 	getCurrentTemperature: function(callback) {
-		this.log("getCurrentTemperature from:", this.apiroute+"/aircon/get_sensor_info");
+		this.log("getCurrentOutsideTemperature from:", this.apiroute+"/aircon/get_sensor_info");
 		request.get({
 			url: this.apiroute+"/aircon/get_sensor_info"
 		}, function(err, response, body) {
@@ -181,6 +306,7 @@ Daikin.prototype = {
 				var json = JSON.parse(convertDaikinToJSON(body)); //{"ret":"OK","htemp":"24.0","hhum""-","otemp":"-","err":"0","cmpfreq":"0"}
 				this.log("Daikin mode is %s, currently %s degrees", this.currentHeatingCoolingState, json.htemp);
 				this.temperature = parseFloat(json.htemp);
+				this.outsideTemperature = parseFloat(json.otemp);
 				callback(null, this.temperature); // success
 			} else {
 				this.log("Error getting state: %s", err);
